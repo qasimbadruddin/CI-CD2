@@ -1,0 +1,19 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy index.html
+        run: |
+          sudo cp index.html /var/www/html/index.html
+          sudo systemctl restart apache2
