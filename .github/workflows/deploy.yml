@@ -13,7 +13,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Deploy index.html
+      - name: Build Docker image
+        run: docker build -t cicd2-web-app .
+
+      - name: Stop old conatiner
         run: |
-          sudo cp index.html /var/www/html/index.html
-          sudo systemctl restart apache2
+          docker stop web || true
+          docker rm web || true
+
+      - name: Run new container
+        run: docker run -d --name web -p 80:80 cicd2-web-app
