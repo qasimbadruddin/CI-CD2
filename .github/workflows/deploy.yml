@@ -24,7 +24,7 @@ jobs:
       - name: Health check new container
         run: |
           sleep 5
-          curl -f http://localhost:8082
+          curl -f http://localhost:8082/health
 
       - name: Switch traffic to green
         run: |
