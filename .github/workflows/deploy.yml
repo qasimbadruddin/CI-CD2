@@ -1,4 +1,5 @@
-name: Zero downtime deploy
+
+name: CI-CD to ECS (Safe)
 
 on:
   push:
@@ -9,38 +10,92 @@ jobs:
   deploy:
     runs-on: self-hosted
 
+    env:
+      AWS_REGION: eu-north-1
+      AWS_ACCOUNT_ID: "058264429057"
+      ECR_REPO: cicd2-web-app
+      ECS_CLUSTER: cicd2-cluster
+      ECS_SERVICE: CI-CD2-service
+      TASK_FAMILY: CI-CD2
+
     steps:
-      - name: Checkout code
+      # 1️⃣ Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v3
 
+      # 2️⃣ Validate critical variables (FAIL FAST)
+      - name: Validate AWS Account ID
+        run: |
+          echo "AWS_ACCOUNT_ID = $AWS_ACCOUNT_ID"
+          if ! [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+            echo "❌ Invalid AWS_ACCOUNT_ID"
+            exit 1
+          fi
+
+      # 3️⃣ Login to ECR
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region $AWS_REGION \
+          | docker login --username AWS --password-stdin \
+            $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+      # 4️⃣ Build Docker image
       - name: Build Docker image
-        run: docker build -t cicd2-web-app .
-
-      - name: Free green slot (port 8082)
         run: |
-          docker rm -f web-green || true
-          docker ps --filter "publish=8082" -q | xargs -r docker rm -f
+          docker build -t $ECR_REPO:${{ github.sha }} .
 
-      - name: Run new container on green port
+      # 5️⃣ Tag & push image
+      - name: Push image to ECR
         run: |
-          docker run -d --name web-green -p 8082:80 cicd2-web-app:latest
+          IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:${{ github.sha }}"
+          echo "Pushing image: $IMAGE_URI"
 
-      - name: Health check new container
-        run: |
-          sleep 5
-          curl -f http://localhost:8082/health
+          docker tag $ECR_REPO:${{ github.sha }} $IMAGE_URI
+          docker push $IMAGE_URI
 
-      - name: Switch traffic to green
+      # 6️⃣ Fetch current task definition
+      - name: Download current ECS task definition
         run: |
-          sudo sed -i 's/8081/8082/' /etc/nginx/sites-available/default
-          sudo nginx -t
-          sudo systemctl reload nginx
+          aws ecs describe-task-definition \
+            --region $AWS_REGION \
+            --task-definition $TASK_FAMILY \
+            --query taskDefinition \
+            > task-def.json
 
-      - name: Stop old blue conatiner
+      # 7️⃣ Render new task definition (SAFE)
+      - name: Render new task definition
         run: |
-          docker rm -f web-blue || true
+          sudo apt-get update -y
+          sudo apt-get install -y jq
 
-      - name: Rename green to blue
+          IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:${{ github.sha }}"
+          echo "Using image: $IMAGE_URI"
+
+          jq --arg IMAGE "$IMAGE_URI" \
+            '.containerDefinitions[0].image = $IMAGE
+             | del(
+                .taskDefinitionArn,
+                .revision,
+                .status,
+                .requiresAttributes,
+                .compatibilities,
+                .registeredAt,
+                .registeredBy
+              )' \
+            task-def.json > new-task-def.json
+
+      # 8️⃣ Register new task definition
+      - name: Register new task definition
         run: |
-          docker rename web-green web-blue
-      
+          aws ecs register-task-definition \
+            --region $AWS_REGION \
+            --cli-input-json file://new-task-def.json
+
+      # 9️⃣ Update ECS service
+      - name: Deploy to ECS service
+        run: |
+          aws ecs update-service \
+            --region $AWS_REGION \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --task-definition $TASK_FAMILY
